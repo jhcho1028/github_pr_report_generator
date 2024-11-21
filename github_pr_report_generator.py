@@ -2,6 +2,9 @@ import requests
 import pandas as pd
 import time
 import requests
+import json
+import os
+from os.path import exists
 from requests.exceptions import ConnectionError, Timeout, RequestException
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string
@@ -9,7 +12,9 @@ from datetime import datetime
 
 
 # GitHub Personal Access Token
-GITHUB_TOKEN = 'JH_TOKEN'
+GITHUB_TOKEN = os.environ.get('JH_TOKEN')
+if not GITHUB_TOKEN:
+    raise EnvironmentError("GITHUB_TOKEN environment variable not set.")
 
 # GitHub API request headers
 headers = {
@@ -17,11 +22,27 @@ headers = {
     'Accept': 'application/vnd.github.v3+json'
 }
 
+CACHE_FILE = "pr_cache.json"
+
+# Load cache
+def load_cache():
+    if exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as file:
+            return json.load(file)
+    return {}
+
+# Save cache
+def save_cache(cache):
+    with open(CACHE_FILE, "w") as file:
+        json.dump(cache, file)
+
+pr_cache = load_cache()
+
 def get_rate_limit():
     """Fetch GitHub API rate limit."""
     rate_limit_url = 'https://api.github.com/rate_limit'
     rate_limit_response = requests.get(rate_limit_url, headers=headers)
-    print(rate_limit_response.json())
+    print(json.dumps(rate_limit_response.json(), indent=2))
 
 def get_user_id(username):
     """Fetch the user ID from GitHub API based on username."""
@@ -37,22 +58,31 @@ def get_user_id(username):
     
 def get_repositories_from_excel(repo_excel_path, repo_sheet_name, column_letter):
     """Load repositories from the Excel file's specified column."""
-    print(f"Loading repositories from Excel file '{repo_excel_path}', sheet '{repo_sheet_name}'...")
-    wb = load_workbook(repo_excel_path)
-    ws = wb[repo_sheet_name]
+    try:
+        wb = load_workbook(repo_excel_path)
+        ws = wb[repo_sheet_name]
 
-    repos = []
-    column_index = column_index_from_string(column_letter) - 1
+        repos = []
+        column_index = column_index_from_string(column_letter) - 1
 
-    for row in ws.iter_rows(min_row=2, values_only=True):  # Skip header row
-        repo_name = row[column_index]
-        if repo_name:
-            repos.append(repo_name)
-        else:
-            print("Skipping empty repository name")
+        for row in ws.iter_rows(min_row=2, values_only=True):  # Skip header row
+            repo_name = row[column_index]
+            if repo_name:
+                repos.append(repo_name.strip())  # 이름 정리
+            else:
+                print("Skipping empty repository name")
 
-    print(f"Found {len(repos)} repositories.")
-    return repos
+        print(f"Found {len(repos)} repositories.")
+        return repos
+    except FileNotFoundError:
+        print(f"Error: File not found at {repo_excel_path}")
+        return []
+    except KeyError:
+        print(f"Error: Sheet '{repo_sheet_name}' not found in the Excel file.")
+        return []
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return []
 
 def get_contributors_from_excel(repo_excel_path, contributor_sheet_name, column_letter):
     """Load contributors from the Excel file's specified column."""
@@ -75,7 +105,7 @@ def get_contributors_from_excel(repo_excel_path, contributor_sheet_name, column_
 
 def get_prs_for_repository(repo_name):
     """Fetch PRs for a given repository."""
-    print(f"\nFetching PR list for repository '{repo_name}'...")
+    print(f"Fetching PR list for repository '{repo_name}'...")
     all_prs = []
     page = 1
 
@@ -87,7 +117,7 @@ def get_prs_for_repository(repo_name):
             prs = response.json()
             if not prs:
                 break
-            print(f"Found {len(prs)} PRs on page {page}.")
+            print(f"Found {len(prs)} PRs on page {page}.\n")
             all_prs.extend(prs)
             page += 1
             time.sleep(1)  # 1초 대기 후 다음 요청
@@ -119,17 +149,38 @@ def calculate_merge_time(created_at, closed_at):
         return (closed_time - created_time).days
     return 'N/A'
 
-def extract_data_from_prs(prs, repo_name, user_id):
-    """Extract relevant PR data and include merge/cancel status."""
+def extract_data_from_prs(prs, repo_name, user_id, start_date=None, end_date=None):
+    """
+    Extract relevant PR data and include merge/cancel status, filtering by date range.
+    
+    Args:
+        prs (list): List of PRs.
+        repo_name (str): Repository name.
+        user_id (int): Target user ID.
+        start_date (str): Start date in 'YYYY-MM-DD' format (inclusive).
+        end_date (str): End date in 'YYYY-MM-DD' format (inclusive).
+
+    Returns:
+        list: Filtered and processed PR data.
+    """
     data = []
+
+    # Parse the date range
+    start_date = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    end_date = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+
     for pr in prs:
         # Check if the PR is created by the contributor (user_id)
         if pr['user']['id'] == user_id:
+            created_at = datetime.strptime(pr['created_at'], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d")  # PR creation time
+            
+            # Filter by date range
+            if (start_date and created_at < start_date) or (end_date and created_at > end_date):
+                continue  # Skip PRs outside the date range
+
             pr_number = pr['number']
             pr_title = pr['title']
             pr_link = pr['html_url']
-            related_issue = pr.get('body', '').split('Related issue: ')[-1] if 'Related issue: ' in pr.get('body', '') else ''
-            created_at = pr['created_at']  # PR open time
             closed_at = pr['closed_at']  # PR close time (if merged or closed)
             merged_at = pr['merged_at']  # PR merge time (None if not merged)
 
@@ -141,48 +192,83 @@ def extract_data_from_prs(prs, repo_name, user_id):
             else:
                 merge_status = 'Open'
 
-            time_to_merge = calculate_merge_time(created_at, closed_at)
+            time_to_merge = calculate_merge_time(pr['created_at'], closed_at)
             total_changes = get_pr_details(repo_name, pr_number)
 
             # Append the data including time info and merge status
-            data.append([pr_number, repo_name, pr_title, pr_link, related_issue, created_at, closed_at, time_to_merge, total_changes, merge_status])
-        else:
-            print(f"PR #{pr['number']} is not created by the target user.")
-    
+            data.append([pr_number, repo_name, pr_title, pr_link, pr['created_at'], closed_at, time_to_merge, total_changes, merge_status])
+
     return data
 
 
 def save_to_excel(data, output_path):
-    """Save PR data to an Excel file with hyperlinks and No. column."""
+    """Save PR data to an Excel file with PR Number next to PR Title and hyperlinks on PR Number."""
     print("\nSaving data to Excel...")
-    
-    # Add the 'No.' column by adding index numbers to the data
-    numbered_data = [[i + 1] + row for i, row in enumerate(data)]
-    
-    # Create DataFrame with added 'No.' column
-    df = pd.DataFrame(numbered_data, columns=['No.', 'Number', 'Repository', 'PR Title', 'PR Link', 'Related Issue', 'PR Open Time', 'PR Close Time', 'Merge Time (days)', 'Lines Changed', 'PR Merged Status'])
 
-    # Write DataFrame to Excel
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='PR List')
-        wb = writer.book
-        ws = wb['PR List']
+    try:
+        # Add the 'No.' column by adding index numbers to the data
+        numbered_data = [[i + 1] + row for i, row in enumerate(data)]
+        
+        # Create DataFrame with added 'No.' column
+        df = pd.DataFrame(
+            numbered_data, 
+            columns=[
+                'No.', 'Repository', 'PR Title', 'Number', 
+                'PR Open Time', 'PR Close Time', 
+                'Merge Time (days)', 'Lines Changed', 'PR Merged Status'
+            ]
+        )
 
-        # Add hyperlinks to the 'PR Link' column
-        for row in range(2, len(df) + 2):
-            cell = ws.cell(row=row, column=5)  # PR Link is in the 5th column now
-            cell.hyperlink = cell.value  # Set the hyperlink
-            cell.style = 'Hyperlink'  # Apply hyperlink style
+        # Reorder columns to place PR Number next to PR Title
+        column_order = [
+            'No.', 'Repository', 'PR Title', 'Number', 
+            'PR Open Time', 'PR Close Time', 
+            'Merge Time (days)', 'Lines Changed', 'PR Merged Status'
+        ]
+        df = df[column_order]
 
-    print(f"PR list has been saved to '{output_path}' with hyperlinks.")
+        # Write DataFrame to Excel
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='PR List')
+            wb = writer.book
+            ws = wb['PR List']
+
+            # Add hyperlinks to the 'Number' column
+            for row in range(2, len(df) + 2):
+                pr_number = ws.cell(row=row, column=4)  # PR Number is now in the 4th column
+                pr_link = data[row - 2][3]  # Use PR Link from original data
+                pr_number.hyperlink = pr_link  # Set hyperlink on PR Number
+                pr_number.style = 'Hyperlink'  # Apply hyperlink style
+
+        print(f"PR list has been saved to '{output_path}' with hyperlinks on PR Number.")
+    except PermissionError:
+        print(f"Permission Error: Unable to write to '{output_path}'. File might be open.")
+    except Exception as e:
+        print(f"An unexpected error occurred while saving Excel: {e}")
+
+def get_pr_count(repo_name):
+    """Check the number of PRs in a repository using Issues API."""
+    url = f'https://api.github.com/search/issues?q=repo:AdvancedTechnologyInc/{repo_name}+is:pr'
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('total_count', 0)  # Total number of PRs
+    except RequestException as e:
+        print(f"Error checking PR count for repository '{repo_name}': {e}")
+        return 0
 
 def main():
     # Excel settings
-    repo_excel_path = '240930.xlsx'
-    repo_sheet_name = 'RND'
-    repo_column_letter = 'H'  # Repo name in H column
+    # 날짜 범위 설정
+    start_date = "2024-07-01"
+    end_date = "2024-11-19"
+    repo_excel_path = 'repositorylist_241120.xlsx'
+    repo_sheet_name = 'Wafer'
+    repo_column_letter = 'A'  # Repo name in H column
     contributor_sheet_name = 'Contributors'
     contributor_column_letter = 'A'  # Contributor name in A column
+
 
     # Step 1: Check rate limit
     get_rate_limit()
@@ -216,9 +302,22 @@ def main():
 
         # 모든 저장소에 대해 PR 데이터 처리
         for repo_name in repos:
+            print(f"Checking PR count for repository '{repo_name}'...")
+            if repo_name in pr_cache:
+                pr_count = get_pr_count(repo_name)
+            else:
+                pr_count = get_pr_count(repo_name)
+                pr_cache[repo_name] = pr_count
+                save_cache(pr_cache)
+
+            if pr_count == 0:
+                print(f"No PRs found in repository '{repo_name}'. Skipping...")
+                continue
+
+            # PR이 있는 경우에만 데이터를 가져옴
             prs = get_prs_for_repository(repo_name)
-            repo_contributor_data = extract_data_from_prs(prs, repo_name, user_id)
-            contributor_data.extend(repo_contributor_data)  # 각 저장소 데이터를 누적
+            repo_contributor_data = extract_data_from_prs(prs, repo_name, user_id, start_date, end_date)
+            contributor_data.extend(repo_contributor_data)
 
         # Step 5: 기여자의 모든 데이터를 Excel에 저장
         if contributor_data:
