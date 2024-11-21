@@ -1,15 +1,14 @@
 import requests
 import pandas as pd
 import time
-import requests
 import json
 import os
 from os.path import exists
 from requests.exceptions import ConnectionError, Timeout, RequestException
 from openpyxl import load_workbook
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.styles import Alignment
 from datetime import datetime
-
 
 # GitHub Personal Access Token
 GITHUB_TOKEN = os.environ.get('JH_TOKEN')
@@ -65,7 +64,7 @@ def get_repositories_from_excel(repo_excel_path, repo_sheet_name, column_letter)
         repos = []
         column_index = column_index_from_string(column_letter) - 1
 
-        for row in ws.iter_rows(min_row=2, values_only=True):  # Skip header row
+        for row in ws.iter_rows(min_row=1, values_only=True):  # No header # Skip header row
             repo_name = row[column_index]
             if repo_name:
                 repos.append(repo_name.strip())  # 이름 정리
@@ -117,7 +116,7 @@ def get_prs_for_repository(repo_name):
             prs = response.json()
             if not prs:
                 break
-            print(f"Found {len(prs)} PRs on page {page}.\n")
+            print(f"Found {len(prs)} PRs on page {page}.")
             all_prs.extend(prs)
             page += 1
             time.sleep(1)  # 1초 대기 후 다음 요청
@@ -172,14 +171,14 @@ def extract_data_from_prs(prs, repo_name, user_id, start_date=None, end_date=Non
     for pr in prs:
         # Check if the PR is created by the contributor (user_id)
         if pr['user']['id'] == user_id:
-            created_at = datetime.strptime(pr['created_at'], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d")  # PR creation time
+            created_at = datetime.strptime(pr['created_at'], "%Y-%m-%dT%H:%M:%SZ")  # PR creation time
             
             # Filter by date range
             if (start_date and created_at < start_date) or (end_date and created_at > end_date):
                 continue  # Skip PRs outside the date range
 
-            pr_number = pr['number']
             pr_title = pr['title']
+            pr_number = pr['number']
             pr_link = pr['html_url']
             closed_at = pr['closed_at']  # PR close time (if merged or closed)
             merged_at = pr['merged_at']  # PR merge time (None if not merged)
@@ -196,10 +195,9 @@ def extract_data_from_prs(prs, repo_name, user_id, start_date=None, end_date=Non
             total_changes = get_pr_details(repo_name, pr_number)
 
             # Append the data including time info and merge status
-            data.append([pr_number, repo_name, pr_title, pr_link, pr['created_at'], closed_at, time_to_merge, total_changes, merge_status])
+            data.append([repo_name, pr_title, pr_number, pr_link, created_at, closed_at, time_to_merge, total_changes, merge_status])
 
     return data
-
 
 def save_to_excel(data, output_path):
     """Save PR data to an Excel file with PR Number next to PR Title and hyperlinks on PR Number."""
@@ -207,24 +205,28 @@ def save_to_excel(data, output_path):
 
     try:
         # Add the 'No.' column by adding index numbers to the data
-        numbered_data = [[i + 1] + row for i, row in enumerate(data)]
+        numbered_data = [[i + 1] + row[:3] + row[4:] for i, row in enumerate(data)]
         
+        # Verify data structure
+        if data:
+            print(f"Sample row: {data[0]} (Length: {len(data[0])})")
+
         # Create DataFrame with added 'No.' column
         df = pd.DataFrame(
             numbered_data, 
-            columns=[
-                'No.', 'Repository', 'PR Title', 'Number', 
-                'PR Open Time', 'PR Close Time', 
-                'Merge Time (days)', 'Lines Changed', 'PR Merged Status'
-            ]
+            columns = ['No.', 'Repository', 'PR Title',
+                     'PR Number', 'PR Open Time', 'PR Close Time',
+                     'Merge days', 'LOC', 'PR Status']
         )
 
         # Reorder columns to place PR Number next to PR Title
-        column_order = [
-            'No.', 'Repository', 'PR Title', 'Number', 
-            'PR Open Time', 'PR Close Time', 
-            'Merge Time (days)', 'Lines Changed', 'PR Merged Status'
-        ]
+        column_order = ['No.', 'Repository', 'PR Title',
+                     'PR Number', 'PR Open Time', 'PR Close Time',
+                     'Merge days', 'LOC', 'PR Status']
+        
+        if not all(col in df.columns for col in column_order):
+            print(f"Invalid column names in column_order: {column_order}. DataFrame columns: {df.columns}")
+            return
         df = df[column_order]
 
         # Write DataFrame to Excel
@@ -235,10 +237,33 @@ def save_to_excel(data, output_path):
 
             # Add hyperlinks to the 'Number' column
             for row in range(2, len(df) + 2):
-                pr_number = ws.cell(row=row, column=4)  # PR Number is now in the 4th column
-                pr_link = data[row - 2][3]  # Use PR Link from original data
-                pr_number.hyperlink = pr_link  # Set hyperlink on PR Number
-                pr_number.style = 'Hyperlink'  # Apply hyperlink style
+                pr_number_cell = ws.cell(row=row, column=4)
+                pr_number_cell.value = f"#{data[row-2][2]}"
+                pr_number_cell.hyperlink = data[row-2][3]
+                pr_number_cell.style = 'Hyperlink'  # Apply hyperlink style
+            
+            # Auto-adjust column widths
+            for col in ws.columns:
+                max_length = 0
+                col_letter = get_column_letter(col[0].column)  # Get the column letter
+                for cell in col:
+                    try:
+                        if cell.value:
+                            max_length = max(max_length, len(str(cell.value)))
+                    except:
+                        pass
+                adjusted_width = max_length + 2  # Add some padding
+                ws.column_dimensions[col_letter].width = adjusted_width
+
+            # Apply alignment to each cell
+            for row in ws.iter_rows(min_row=1, max_row=len(df)+1, min_col=1, max_col=len(df.columns)):
+                for cell in row:
+                    if cell.column in (1, 4, 5, 6, 7, 8, 9):
+                        cell.alignment = Alignment(horizontal='center')
+                    elif cell.column in (2, 3):
+                        cell.alignment = Alignment(horizontal='left')
+                    else:
+                        cell.alignment = Alignment(horizontal='right')
 
         print(f"PR list has been saved to '{output_path}' with hyperlinks on PR Number.")
     except PermissionError:
@@ -311,7 +336,7 @@ def main():
                 save_cache(pr_cache)
 
             if pr_count == 0:
-                print(f"No PRs found in repository '{repo_name}'. Skipping...")
+                print(f"No PRs found in repository '{repo_name}'. Skipping...\n")
                 continue
 
             # PR이 있는 경우에만 데이터를 가져옴
