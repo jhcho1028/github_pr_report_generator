@@ -180,22 +180,23 @@ def extract_data_from_prs(prs, repo_name, user_id, start_date=None, end_date=Non
             pr_title = pr['title']
             pr_number = pr['number']
             pr_link = pr['html_url']
-            closed_at = pr['closed_at']  # PR close time (if merged or closed)
-            merged_at = pr['merged_at']  # PR merge time (None if not merged)
+            closed_at_raw = pr['closed_at']
+            closed_at = (
+                datetime.strptime(closed_at_raw, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M:%S")
+                if closed_at_raw
+                else None
+            )
+            merged_at = pr['merged_at']
 
-            # Determine merge/cancel status
-            if merged_at:
-                merge_status = 'Merged'
-            elif closed_at and not merged_at:
-                merge_status = 'Cancelled'
-            else:
-                merge_status = 'Open'
-
-            time_to_merge = calculate_merge_time(pr['created_at'], closed_at)
+            merge_status = 'Merged' if merged_at else ('Cancelled' if closed_at_raw else 'Open')
+            time_to_merge = calculate_merge_time(pr['created_at'], closed_at_raw)
             total_changes = get_pr_details(repo_name, pr_number)
 
-            # Append the data including time info and merge status
-            data.append([repo_name, pr_title, pr_number, pr_link, created_at, closed_at, time_to_merge, total_changes, merge_status])
+            data.append([
+                repo_name, pr_title, pr_number, pr_link,
+                created_at.strftime("%Y-%m-%d %H:%M:%S"), closed_at,
+                time_to_merge, total_changes, merge_status
+            ])
 
     return data
 
@@ -243,6 +244,7 @@ def save_to_excel(data, output_path):
                 pr_number_cell.style = 'Hyperlink'  # Apply hyperlink style
             
             # Auto-adjust column widths
+            MAX_COLUMN_WIDTH = 80
             for col in ws.columns:
                 max_length = 0
                 col_letter = get_column_letter(col[0].column)  # Get the column letter
@@ -252,7 +254,7 @@ def save_to_excel(data, output_path):
                             max_length = max(max_length, len(str(cell.value)))
                     except:
                         pass
-                adjusted_width = max_length + 2  # Add some padding
+                adjusted_width = min(max_length + 2, MAX_COLUMN_WIDTH)  # Add some padding
                 ws.column_dimensions[col_letter].width = adjusted_width
 
             # Apply alignment to each cell
@@ -293,7 +295,6 @@ def main():
     repo_column_letter = 'A'  # Repo name in H column
     contributor_sheet_name = 'Contributors'
     contributor_column_letter = 'A'  # Contributor name in A column
-
 
     # Step 1: Check rate limit
     get_rate_limit()
