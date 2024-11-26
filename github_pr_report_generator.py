@@ -43,8 +43,23 @@ def get_rate_limit():
     rate_limit_response = requests.get(rate_limit_url, headers=headers)
     print(json.dumps(rate_limit_response.json(), indent=2))
 
+def ensure_rate_limit():
+    rate_limit_url = 'https://api.github.com/rate_limit'
+    response = requests.get(rate_limit_url, headers=headers)
+    rate_limit_data = response.json()
+
+    remaining = rate_limit_data['rate']['remaining']    # 남은 요청 수
+    reset_time = rate_limit_data['rate']['reset']   # 리셋 시간 
+
+    if remaining == 0:
+        # 요청이 초과되었을 경우, 리셋 될 때 까지 대기
+        wait_time = reset_time - int(time.time())
+        print(f"Rate limit exceeded. Waiting for {wait_time} seconds.")
+        time.sleep(wait_time + 1)
+
 def get_user_id(username):
     """Fetch the user ID from GitHub API based on username."""
+    ensure_rate_limit()
     url = f'https://api.github.com/users/{username}'
     response = requests.get(url, headers=headers)
     
@@ -64,7 +79,7 @@ def get_repositories_from_excel(repo_excel_path, repo_sheet_name, column_letter)
         repos = []
         column_index = column_index_from_string(column_letter) - 1
 
-        for row in ws.iter_rows(min_row=1, values_only=True):  # No header # Skip header row
+        for row in ws.iter_rows(min_row=2, values_only=True):  # No header # Skip header row
             repo_name = row[column_index]
             if repo_name:
                 repos.append(repo_name.strip())  # 이름 정리
@@ -111,15 +126,25 @@ def get_prs_for_repository(repo_name):
     while True:
         url = f'https://api.github.com/repos/AdvancedTechnologyInc/{repo_name}/pulls?state=all&per_page=100&page={page}'
         try:
+            ensure_rate_limit()
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()  # Raise an exception for bad responses
+
+            #check remaining rate limit
+            remaining_limit = int(response.headers.get('X-RateLimit-Remaining', 1))
+            if remaining_limit < 5:
+                reset_time = int(response.headers.get('X-RateLimit-Reset', time.time()))
+                sleep_duration = max(0, reset_time - int(time.time()))
+                print(f"Rate limit nearing. Sleeping for {sleep_duration} seconds...")
+                time.sleep(sleep_duration + 1)
+            
             prs = response.json()
             if not prs:
                 break
             print(f"Found {len(prs)} PRs on page {page}.")
             all_prs.extend(prs)
             page += 1
-            time.sleep(1)  # 1초 대기 후 다음 요청
+            time.sleep(2)  # 2초 대기 후 다음 요청
         except RequestException as e:
             print(f"Error fetching PR list for repository '{repo_name}': {e}")
             break
@@ -129,15 +154,25 @@ def get_prs_for_repository(repo_name):
 def get_pr_details(repo_name, pr_number):
     """Fetch the details for a specific PR."""
     pr_detail_url = f"https://api.github.com/repos/AdvancedTechnologyInc/{repo_name}/pulls/{pr_number}"
-    pr_detail_response = requests.get(pr_detail_url, headers=headers)
-    if pr_detail_response.status_code == 200:
+    try:
+        pr_detail_response = requests.get(pr_detail_url, headers=headers)
+        pr_detail_response.raise_for_status()  # Raise error for bad responses
+
+        # Check rate limit
+        remaining_limit = int(pr_detail_response.headers.get('X-RateLimit-Remaining', 1))
+        if remaining_limit < 5:
+            reset_time = int(pr_detail_response.headers.get('X-RateLimit-Reset', time.time()))
+            sleep_duration = max(0, reset_time - int(time.time()))
+            print(f"Rate limit nearing. Sleeping for {sleep_duration} seconds...")
+            time.sleep(sleep_duration + 1)
+
         pr_details = pr_detail_response.json()
         additions = pr_details.get('additions', 0)
         deletions = pr_details.get('deletions', 0)
         total_changes = additions + deletions
         return total_changes
-    else:
-        print(f"Failed to fetch details for PR #{pr_number}")
+    except RequestException as e:
+        print(f"Failed to fetch details for PR #{pr_number}: {e}")
         return 'N/A'
 
 def calculate_merge_time(created_at, closed_at):
@@ -258,7 +293,7 @@ def save_to_excel(data, output_path):
                 ws.column_dimensions[col_letter].width = adjusted_width
 
             # Apply alignment to each cell
-            for row in ws.iter_rows(min_row=1, max_row=len(df)+1, min_col=1, max_col=len(df.columns)):
+            for row in ws.iter_rows(min_row=2, max_row=len(df)+1, min_col=1, max_col=len(df.columns)):
                 for cell in row:
                     if cell.column in (1, 4, 5, 6, 7, 8, 9):
                         cell.alignment = Alignment(horizontal='center')
@@ -275,10 +310,20 @@ def save_to_excel(data, output_path):
 
 def get_pr_count(repo_name):
     """Check the number of PRs in a repository using Issues API."""
+    ensure_rate_limit()
     url = f'https://api.github.com/search/issues?q=repo:AdvancedTechnologyInc/{repo_name}+is:pr'
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
+
+        #check remaining rate limit
+        remaining_limit = int(response.headers.get('X-RateLimit-Remaining', 1))
+        if remaining_limit < 5:
+            reset_time = int(response.headers.get('X-RateLimit-Reset', time.time()))
+            sleep_duration = max(0, reset_time - int(time.time()))
+            print(f"Rate limit nearing. Sleeping for {sleep_duration} seconds...")
+            time.sleep(sleep_duration + 1)
+
         data = response.json()
         return data.get('total_count', 0)  # Total number of PRs
     except RequestException as e:
@@ -288,12 +333,12 @@ def get_pr_count(repo_name):
 def main():
     # Excel settings
     # 날짜 범위 설정
-    start_date = "2024-07-01"
-    end_date = "2024-11-19"
-    repo_excel_path = 'repositorylist_241120.xlsx'
-    repo_sheet_name = 'Wafer'
+    start_date = "2024-06-26"
+    end_date = "2024-11-25"
+    repo_excel_path = 'repositorylist_241126.xlsx'
+    repo_sheet_name = 'repositories'
     repo_column_letter = 'A'  # Repo name in H column
-    contributor_sheet_name = 'Contributors'
+    contributor_sheet_name = 'contributors_for_autosw'
     contributor_column_letter = 'A'  # Contributor name in A column
 
     # Step 1: Check rate limit
