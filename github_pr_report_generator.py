@@ -7,7 +7,7 @@ from os.path import exists
 from requests.exceptions import ConnectionError, Timeout, RequestException
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Font
 from datetime import datetime
 
 # GitHub Personal Access Token
@@ -81,7 +81,8 @@ def get_repositories_from_excel(repo_excel_path, repo_sheet_name, column_letter)
 
         for row in ws.iter_rows(min_row=2, values_only=True):  # No header # Skip header row
             repo_name = row[column_index]
-            if repo_name:
+            print(f"Repo name: '{repo_name}'")
+            if repo_name and repo_name.strip():
                 repos.append(repo_name.strip())  # 이름 정리
             else:
                 print("Skipping empty repository name")
@@ -107,7 +108,7 @@ def get_contributors_from_excel(repo_excel_path, contributor_sheet_name, column_
     contributors = []
     column_index = column_index_from_string(column_letter) - 1
 
-    for row in ws.iter_rows(min_row=1, values_only=True):  # Skip header row
+    for row in ws.iter_rows(min_row=2, values_only=True):  # Skip header row
         contributor_name = row[column_index]
         if contributor_name:
             contributors.append(contributor_name)
@@ -251,13 +252,13 @@ def save_to_excel(data, output_path):
         df = pd.DataFrame(
             numbered_data, 
             columns = ['No.', 'Repository', 'PR Title',
-                     'PR Number', 'PR Open Time', 'PR Close Time',
+                     'PR No.', 'PR Open Time', 'PR Close Time',
                      'Merge days', 'LOC', 'PR Status']
         )
 
         # Reorder columns to place PR Number next to PR Title
         column_order = ['No.', 'Repository', 'PR Title',
-                     'PR Number', 'PR Open Time', 'PR Close Time',
+                     'PR No.', 'PR Open Time', 'PR Close Time',
                      'Merge days', 'LOC', 'PR Status']
         
         if not all(col in df.columns for col in column_order):
@@ -278,7 +279,7 @@ def save_to_excel(data, output_path):
                 pr_number_cell.hyperlink = data[row-2][3]
                 pr_number_cell.style = 'Hyperlink'  # Apply hyperlink style
             
-            # Auto-adjust column widths
+            # Auto-adjust column widths # 이거 다시 봐야됨
             MAX_COLUMN_WIDTH = 80
             for col in ws.columns:
                 max_length = 0
@@ -334,11 +335,11 @@ def main():
     # Excel settings
     # 날짜 범위 설정
     start_date = "2024-06-26"
-    end_date = "2024-11-25"
-    repo_excel_path = 'repositorylist_241126.xlsx'
+    end_date = "2024-11-30" # UTC 기준이니 주의!
+    repo_excel_path = 'repositorylist_241129.xlsx'
     repo_sheet_name = 'repositories'
-    repo_column_letter = 'A'  # Repo name in H column
-    contributor_sheet_name = 'contributors_for_autosw'
+    repo_column_letter = 'C'  # Repo name in X column
+    contributor_sheet_name = 'contributors'
     contributor_column_letter = 'A'  # Contributor name in A column
 
     # Step 1: Check rate limit
